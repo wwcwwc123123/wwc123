@@ -1,82 +1,67 @@
 import streamlit as st
 import time
-import datetime
+from datetime import datetime
 import pandas as pd
-import matplotlib.pyplot as plt
 
-# -------------------------- 页面设置 --------------------------
-st.set_page_config(page_title="无人机心跳包监控", layout="wide")
+# -------------------------- 页面配置 --------------------------
+st.set_page_config(page_title="无人机心跳监控", layout="wide")
 st.title("📡 无人机心跳包 自发自收实时监控")
-st.subheader("每秒发送1次心跳包 | 3秒未收到 = 连接超时")
+st.info("每秒发送1次心跳包 | 3秒未收到 → 连接超时")
 
-# -------------------------- 初始化会话状态（重启不丢失数据） --------------------------
-if "heartbeat_list" not in st.session_state:
-    st.session_state.heartbeat_list = []  # 保存所有心跳数据
-if "last_receive_time" not in st.session_state:
-    st.session_state.last_receive_time = time.time()  # 最后一次收到包的时间
+# -------------------------- 初始化状态（防刷新丢失） --------------------------
+if "heartbeat_data" not in st.session_state:
+    st.session_state.heartbeat_data = []
+if "last_recv_time" not in st.session_state:
+    st.session_state.last_recv_time = time.time()
 if "seq" not in st.session_state:
-    st.session_state.seq = 1  # 心跳序号从1开始
+    st.session_state.seq = 1
 
-# -------------------------- 状态显示区域 --------------------------
-status_col1, status_col2 = st.columns(2)
-with status_col1:
-    status_placeholder = st.empty()  # 状态提示
-with status_col2:
-    seq_placeholder = st.empty()     # 当前序号
+# -------------------------- 占位符（避免重复渲染报错） --------------------------
+status_box = st.empty()
+seq_box = st.empty()
+chart_box = st.empty()
+table_box = st.empty()
 
-# 图表 + 数据列表
-chart_placeholder = st.empty()
-data_table_placeholder = st.empty()
+# -------------------------- 每秒执行一次心跳 --------------------------
+while True:
+    now = time.time()
+    current_time = datetime.now().strftime("%H:%M:%S")
 
-# -------------------------- 主循环：每秒收发心跳 --------------------------
-try:
-    while True:
-        now = time.time()
-        current_dt = datetime.datetime.now().strftime("%H:%M:%S")
-        
-        # 1. 发送 + 接收心跳包（模拟）
-        st.session_state.last_receive_time = now
-        packet = {
-            "心跳序号": st.session_state.seq,
-            "接收时间": current_dt,
-            "时间戳": now
-        }
-        st.session_state.heartbeat_list.append(packet)
+    # 模拟：收到心跳包
+    st.session_state.last_recv_time = now
 
-        # 2. 更新序号
-        current_seq = st.session_state.seq
-        st.session_state.seq += 1
+    # 添加数据
+    st.session_state.heartbeat_data.append({
+        "心跳序号": st.session_state.seq,
+        "接收时间": current_time,
+        "时间戳": round(now, 1)
+    })
 
-        # 3. 判断是否超时（3秒）
-        time_diff = now - st.session_state.last_receive_time
-        if time_diff > 3:
-            status_placeholder.error(f"🔴 连接超时 | {time_diff:.1f}s 未收到心跳包")
-        else:
-            status_placeholder.success(f"🟢 正常连接 | 最后接收 {time_diff:.1f}s 前")
+    # 超时判断（3秒）
+    gap = now - st.session_state.last_recv_time
+    if gap > 3:
+        status_box.error(f"🔴 连接超时 | {gap:.1f}s 未收到心跳")
+    else:
+        status_box.success(f"🟢 连接正常 | 最后收到 {gap:.1f}s 前")
 
-        seq_placeholder.info(f"📶 当前心跳序号：{current_seq}")
+    # 显示当前序号
+    seq_box.metric("当前心跳序号", st.session_state.seq)
 
-        # -------------------------- 绘制折线图 --------------------------
-        df = pd.DataFrame(st.session_state.heartbeat_list)
-        with chart_placeholder.container():
-            st.subheader("📈 心跳序号随时间变化曲线")
-            if len(df) > 0:
-                fig, ax = plt.subplots(figsize=(10, 4))
-                ax.plot(df["接收时间"], df["心跳序号"], marker="o", color="#1f77b4", linewidth=2)
-                ax.set_xlabel("时间")
-                ax.set_ylabel("心跳序号")
-                ax.grid(True)
-                plt.xticks(rotation=45)
-                plt.tight_layout()
-                st.pyplot(fig)
+    # 序号+1
+    st.session_state.seq += 1
 
-        # -------------------------- 显示数据列表 --------------------------
-        with data_table_placeholder.container():
-            st.subheader("📋 心跳包数据列表")
-            st.dataframe(df, use_container_width=True, height=200)
+    # 转DataFrame
+    df = pd.DataFrame(st.session_state.heartbeat_data)
 
-        # 每秒一次
-        time.sleep(1)
+    # -------------------------- 绘制原生折线图（无BUG） --------------------------
+    with chart_box.container():
+        st.subheader("📈 心跳序号变化曲线")
+        st.line_chart(df, x="接收时间", y="心跳序号", use_container_width=True)
 
-except Exception as e:
-    st.error(f"程序异常：{str(e)}")
+    # -------------------------- 数据列表 --------------------------
+    with table_box.container():
+        st.subheader("📋 心跳包历史记录")
+        st.dataframe(df.tail(15), use_container_width=True, height=300)
+
+    # 每秒一次
+    time.sleep(1)
