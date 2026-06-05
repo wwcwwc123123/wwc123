@@ -4,3 +4,4 @@ plotly
 pyproj
 folium
 streamlit-folium
+numpy
