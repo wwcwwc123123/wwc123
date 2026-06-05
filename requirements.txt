@@ -2,4 +2,5 @@ streamlit
 pandas
 plotly
 pyproj
-pydeck==0.8.0
+streamlit-folium
+folium
