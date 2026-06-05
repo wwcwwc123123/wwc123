@@ -2,4 +2,4 @@ streamlit
 pandas
 plotly
 pyproj
-pydeck
+pydeck==0.8.0
