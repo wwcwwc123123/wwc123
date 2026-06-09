@@ -10,7 +10,7 @@ from folium.plugins import Draw
 from streamlit_folium import st_folium
 from datetime import datetime
 
-# -------------------------- 坐标系转换 --------------------------
+# -------------------------- 坐标系转换（GCJ-02） --------------------------
 PI = 3.14159265358979323846
 EE = 0.006693421622965943
 A = 6378245.0
@@ -45,18 +45,6 @@ def transformlng(lng, lat):
 def out_of_china(lng, lat):
     return not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271)
 
-class CoordConverter:
-    def __init__(self):
-        self.wgs2utm = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32650", always_xy=True)
-        self.campus = {"lat_min":32.231, "lat_max":32.235, "lng_min":118.747, "lng_max":118.751}
-    def wgs_to_utm(self,lng,lat):
-        x,y = self.wgs2utm.transform(lng,lat)
-        return round(x,2), round(y,2)
-    def in_campus(self,lng,lat):
-        return self.campus["lat_min"]<=lat<=self.campus["lat_max"] and self.campus["lng_min"]<=lng<=self.campus["lng_max"]
-
-coord = CoordConverter()
-
 # -------------------------- 固定AB点 --------------------------
 A_LNG, A_LAT = 118.749, 32.2322
 B_LNG, B_LAT = 118.749, 32.2343
@@ -72,34 +60,32 @@ if "safe_radius" not in st.session_state:
     st.session_state.safe_radius = 5
 if "route_choice" not in st.session_state:
     st.session_state.route_choice = "直线飞行"
+# 关键：给地图一个可变key，每次导入都变
+if "map_key" not in st.session_state:
+    st.session_state.map_key = "map_0"
 
 if "heart_data" not in st.session_state:
     st.session_state.heart_data = []
 if "running" not in st.session_state:
     st.session_state.running = False
 
-# -------------------------- 航线生成函数（核心新增） --------------------------
-def generate_route(A, B, obs_list, safe_radius, mode="直线"):
-    # A,B: (lat,lng)
-    # obs_list: [[lat,lng],...] 多边形
-    # mode: 直线/向左绕行/向右绕行/最佳航线
+# -------------------------- 航线生成函数 --------------------------
+def generate_route(A, B, safe_radius, mode="直线"):
     if mode == "直线":
         return [A, B]
-    # 简单左右绕行（垂直AB方向偏移）
     dx = B[1] - A[1]
     dy = B[0] - A[0]
     L = math.hypot(dx, dy)
     if L == 0:
         return [A, B]
-    # 法向量
     nx = -dy / L
     ny = dx / L
-    offset = safe_radius * 0.0001  # 经纬度偏移量（简易缩放）
+    offset = safe_radius * 0.0001
     if mode == "向左绕行":
         mid = ((A[0]+B[0])/2 + ny*offset, (A[1]+B[1])/2 + nx*offset)
     elif mode == "向右绕行":
         mid = ((A[0]+B[0])/2 - ny*offset, (A[1]+B[1])/2 - nx*offset)
-    else:  # 最佳航线=中间轻微偏移
+    else:
         mid = ((A[0]+B[0])/2 + ny*offset*0.5, (A[1]+B[1])/2 + nx*offset*0.5)
     return [A, mid, B]
 
@@ -134,6 +120,7 @@ with tab1:
         if st.button("🗑️ 清空所有障碍物"):
             st.session_state.obstacles = []
             st.session_state.obstacle_heights = []
+            st.session_state.map_key = "map_" + str(time.time())  # 变key刷新地图
             st.rerun()
     with col2:
         export_data = []
@@ -154,13 +141,13 @@ with tab1:
             for d in data:
                 st.session_state.obstacles.append(d["polygon"])
                 st.session_state.obstacle_heights.append(d["height"])
-            st.success("✅ 导入成功！")
+            st.success("✅ 导入成功！障碍物已加载到地图")
+            st.session_state.map_key = "map_" + str(time.time())  # 关键：改key强制刷新地图
             st.rerun()
 
     st.info("👉 操作：地图左上角点【多边形】→圈选→下方设置高度→自动更新航线")
     st.divider()
 
-    # ---------- 核心：每次都重新生成地图和航线 ----------
     A = (A_LAT, A_LNG)
     B = (B_LAT, B_LNG)
     need_avoid = False
@@ -168,7 +155,6 @@ with tab1:
     if st.session_state.drone_height < obstacle_max_h:
         need_avoid = True
 
-    # 选择航线模式
     if need_avoid:
         st.error(f"⚠️ 无人机高度 {st.session_state.drone_height}m ＜ 障碍物最高 {obstacle_max_h}m → 需要绕行")
         st.session_state.route_choice = st.radio("选择绕行航线", ["向左绕行", "向右绕行", "最佳航线（推荐）"])
@@ -176,10 +162,9 @@ with tab1:
         st.success(f"✅ 无人机高度 {st.session_state.drone_height}m ＞ 障碍物最高 {obstacle_max_h}m → 直接飞跃")
         st.session_state.route_choice = "直线飞行"
 
-    # 生成当前航线
-    route_points = generate_route(A, B, st.session_state.obstacles, st.session_state.safe_radius, st.session_state.route_choice)
+    route_points = generate_route(A, B, st.session_state.safe_radius, st.session_state.route_choice)
 
-    # ---------- 绘制地图 ----------
+    # ---------- 绘制地图（key每次变，强制刷新） ----------
     m = folium.Map(location=[(A_LAT+B_LAT)/2, (A_LNG+B_LNG)/2], zoom_start=19)
     folium.TileLayer(
         tiles="https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}",
@@ -192,11 +177,10 @@ with tab1:
         draw_options={"polygon":True,"polyline":False,"rectangle":False,"circle":False,"marker":False}
     ).add_to(m)
 
-    # AB点
     folium.Marker(A, icon=folium.Icon(color="red"), popup="起点A").add_to(m)
     folium.Marker(B, icon=folium.Icon(color="blue"), popup="终点B").add_to(m)
 
-    # 障碍物
+    # 绘制所有障碍物（导入的+新画的）
     for idx, obs in enumerate(st.session_state.obstacles):
         folium.Polygon(
             locations=obs,
@@ -204,7 +188,6 @@ with tab1:
             popup=f"障碍物{idx+1} 高度：{st.session_state.obstacle_heights[idx]}m"
         ).add_to(m)
 
-    # 绘制当前航线（关键！）
     if st.session_state.route_choice == "直线飞行":
         col = "green"
     elif st.session_state.route_choice == "向左绕行":
@@ -215,10 +198,9 @@ with tab1:
         col = "blue"
     folium.PolyLine(route_points, color=col, weight=5, popup=st.session_state.route_choice).add_to(m)
 
-    # 显示地图
-    out = st_folium(m, key="map_main", width="100%", height=550, returned_objects=["all_drawings"])
+    # 关键：用动态key，每次导入/清空都变 → 地图强制重绘
+    out = st_folium(m, key=st.session_state.map_key, width="100%", height=550, returned_objects=["all_drawings"])
 
-    # 自动保存新圈选的障碍物
     if out and out.get("all_drawings"):
         new_obs = False
         for d in out["all_drawings"]:
@@ -230,9 +212,9 @@ with tab1:
                     st.session_state.obstacle_heights.append(10)
                     new_obs = True
         if new_obs:
+            st.session_state.map_key = "map_" + str(time.time())
             st.rerun()
 
-    # 障碍物高度设置
     if st.session_state.obstacles:
         st.subheader("📏 设置每个障碍物高度")
         new_heights = []
@@ -241,6 +223,7 @@ with tab1:
             new_heights.append(h)
         if new_heights != st.session_state.obstacle_heights:
             st.session_state.obstacle_heights = new_heights
+            st.session_state.map_key = "map_" + str(time.time())
             st.rerun()
 
 # -------------------------- 飞行监控页面 --------------------------
