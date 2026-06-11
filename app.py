@@ -23,7 +23,7 @@ def wgs84_to_gcj02(lng, lat):
     magic = math.sin(radlat)
     magic = 1 - EE * magic * magic
     sqrtmagic = math.sqrt(magic)
-    dlat = (dlat * 180.0) / ((A * 1 - EE) / (magic * sqrtmagic) * PI)
+    dlat = (dlat * 180.0) / ((A * (1 - EE)) / (magic * sqrtmagic) * PI)
     dlng = (dlng * 180.0) / (A / sqrtmagic * math.cos(radlat) * PI)
     return lng + dlng, lat + dlat
 
@@ -80,10 +80,10 @@ def line_cross_poly(p1, p2, poly):
     return False
 
 def inflate_polygon(poly, offset_m):
-    offset = offset_m * 0.00001
+    offset = offset_m * 0.000015
     return [(lat+offset, lng+offset) for (lat,lng) in poly]
 
-# -------------------------- 固定AB点 --------------------------
+# -------------------------- 固定起止点 --------------------------
 A_LNG, A_LAT = 118.749, 32.2322
 B_LNG, B_LAT = 118.749, 32.2343
 
@@ -105,41 +105,42 @@ if "heart_data" not in st.session_state:
 if "running" not in st.session_state:
     st.session_state.running = False
 
-# -------------------------- 航线生成 --------------------------
-def generate_route(A, B, obstacles, safe_radius, mode="直线"):
-    if mode == "直线":
-        return [A, B]
-    inflated = [inflate_polygon(obs, safe_radius) for obs in obstacles]
-    need_avoid = any(line_cross_poly(A,B,poly) for poly in inflated)
+# -------------------------- 航线生成（核心避障逻辑） --------------------------
+def generate_route(A, B, obstacles, safe_radius, mode, need_avoid):
+    # 无需绕行：强制返回直线
     if not need_avoid:
-        return [A,B]
+        return [A, B]
 
+    # 障碍物膨胀（预留安全距离）
+    inflated = [inflate_polygon(obs, safe_radius) for obs in obstacles]
     obs = inflated[0]
-    mid_lat, mid_lng = (A[0]+B[0])/2, (A[1]+B[1])/2
-    closest_pt = min(obs, key=lambda p: math.hypot(p[0]-mid_lat, p[1]-mid_lng))
 
-    dx = B[1]-A[1]
-    dy = B[0]-A[0]
+    # 计算AB方向向量与法向量
+    dx = B[1] - A[1]
+    dy = B[0] - A[0]
     L = math.hypot(dx, dy)
-    nx, ny = -dy/L, dx/L
-    offset = safe_radius * 0.0002
+    if L == 0:
+        return [A, B]
+    nx, ny = -dy / L, dx / L
+    offset = safe_radius * 0.00025
 
+    # 三种绕行航线
     if mode == "向左绕行":
-        detour = (closest_pt[0]+ny*offset, closest_pt[1]+nx*offset)
+        mid_p = ((A[0]+B[0])/2 + ny*offset, (A[1]+B[1])/2 + nx*offset)
+        return [A, mid_p, B]
     elif mode == "向右绕行":
-        detour = (closest_pt[0]-ny*offset, closest_pt[1]-nx*offset)
-    else:
-        d1 = math.hypot(A[0]-(closest_pt[0]+ny*offset), A[1]-(closest_pt[1]+nx*offset)) + \
-             math.hypot((closest_pt[0]+ny*offset)-B[0], (closest_pt[1]+nx*offset)-B[1])
-        d2 = math.hypot(A[0]-(closest_pt[0]-ny*offset), A[1]-(closest_pt[1]-nx*offset)) + \
-             math.hypot((closest_pt[0]-ny*offset)-B[0], (closest_pt[1]-nx*offset)-B[1])
-        detour = (closest_pt[0]+ny*offset, closest_pt[1]+nx*offset) if d1 < d2 else (closest_pt[0]-ny*offset, closest_pt[1]-nx*offset)
-    return [A, detour, B]
+        mid_p = ((A[0]+B[0])/2 - ny*offset, (A[1]+B[1])/2 - nx*offset)
+        return [A, mid_p, B]
+    else: # 最佳航线：取左右中更短路径
+        p1 = ((A[0]+B[0])/2 + ny*offset, (A[1]+B[1])/2 + nx*offset)
+        p2 = ((A[0]+B[0])/2 - ny*offset, (A[1]+B[1])/2 - nx*offset)
+        d1 = math.hypot(A[0]-p1[0], A[1]-p1[1]) + math.hypot(p1[0]-B[0], p1[1]-B[1])
+        d2 = math.hypot(A[0]-p2[0], A[1]-p2[1]) + math.hypot(p2[0]-B[0], p2[1]-B[1])
+        return [A, p1, B] if d1 < d2 else [A, p2, B]
 
-# -------------------------- 页面配置 --------------------------
+# -------------------------- 页面主体 --------------------------
 st.set_page_config(page_title="无人机航线规划系统", layout="wide")
 st.title("🎓 校园无人机智能航线规划 + 飞行监控")
-
 tab1, tab2 = st.tabs(["🗺️ 航线规划（含障碍物圈选）", "📡 飞行监控（心跳包）"])
 
 with tab1:
@@ -153,15 +154,19 @@ with tab1:
     st.divider()
     st.subheader("⚙️ 无人机参数设置")
     c1, c2 = st.columns(2)
-    with c1:
-        st.session_state.drone_height = st.number_input("无人机飞行高度 (米)", 1, 500, st.session_state.drone_height)
-    with c2:
-        st.session_state.safe_radius = st.number_input("无人机安全半径 (米)", 1, 20, st.session_state.safe_radius)
+    # 修改飞行高度后自动刷新
+    new_drone_h = st.number_input("无人机飞行高度 (米)", 1, 500, st.session_state.drone_height)
+    new_safe_r = st.number_input("无人机安全半径 (米)", 1, 20, st.session_state.safe_radius)
+
+    # 参数变化触发刷新
+    if new_drone_h != st.session_state.drone_height or new_safe_r != st.session_state.safe_radius:
+        st.session_state.drone_height = new_drone_h
+        st.session_state.safe_radius = new_safe_r
+        st.session_state.map_key = f"map_{time.time()}"
+        st.rerun()
 
     st.divider()
-    st.subheader("🚧 障碍物圈选、管理、导入导出")
-
-    # 功能按钮行：清空、导出、导入
+    st.subheader("🚧 障碍物管理 | 导入 | 导出")
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("🗑️ 清空全部障碍物"):
@@ -188,50 +193,63 @@ with tab1:
                 fixed_poly = [(lat, lng) for (lat, lng) in poly]
                 st.session_state.obstacles.append(fixed_poly)
                 st.session_state.obstacle_heights.append(d["height"])
-            st.success("✅ 导入成功！障碍物已加载到地图")
+            st.success("✅ 导入成功！障碍物已加载")
             st.session_state.map_key = f"map_{time.time()}"
             st.rerun()
 
-    st.info("👉 操作：地图左上角点【多边形】圈选障碍物")
+    st.info("👉 地图左上角选择【多边形】工具圈选障碍物")
     st.divider()
 
+    # 核心判断：是否需要绕行
     A = (A_LAT, A_LNG)
     B = (B_LAT, B_LNG)
-    obstacle_max_h = max(st.session_state.obstacle_heights) if st.session_state.obstacle_heights else 0
-    need_avoid = st.session_state.drone_height < obstacle_max_h
+    max_obs_h = max(st.session_state.obstacle_heights) if st.session_state.obstacle_heights else 0
+    need_avoid = st.session_state.drone_height < max_obs_h
 
+    # 航线选择区
     if need_avoid:
-        st.error(f"⚠️ 无人机高度 {st.session_state.drone_height}m ＜ 障碍物最高 {obstacle_max_h}m → 需要绕行")
-        st.session_state.route_choice = st.radio("选择绕行航线", ["向左绕行", "向右绕行", "最佳航线（推荐）"])
+        st.error(f"⚠️ 无人机高度({st.session_state.drone_height}m) < 障碍物最高({max_obs_h}m)，必须绕行")
+        route_opt = st.radio("选择绕行方案", ["向左绕行", "向右绕行", "最佳航线（推荐）"])
+        # 切换航线选项立即刷新
+        if route_opt != st.session_state.route_choice:
+            st.session_state.route_choice = route_opt
+            st.session_state.map_key = f"map_{time.time()}"
+            st.rerun()
     else:
-        st.success(f"✅ 无人机高度 {st.session_state.drone_height}m ＞ 障碍物最高 {obstacle_max_h}m → 直接飞跃")
+        st.success(f"✅ 无人机高度({st.session_state.drone_height}m) ≥ 障碍物最高({max_obs_h}m)，直线飞跃")
         st.session_state.route_choice = "直线飞行"
 
-    route_points = generate_route(A, B, st.session_state.obstacles, st.session_state.safe_radius, st.session_state.route_choice)
+    # 生成最终航线点位
+    route_points = generate_route(
+        A, B,
+        st.session_state.obstacles,
+        st.session_state.safe_radius,
+        st.session_state.route_choice,
+        need_avoid
+    )
 
-    # 新建地图并绘制所有元素
+    # 绘制地图
     m = folium.Map(location=[(A_LAT+B_LAT)/2, (A_LNG+B_LNG)/2], zoom_start=19)
     folium.TileLayer(
         tiles="https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}",
         attr="高德卫星"
     ).add_to(m)
-
     Draw(export=True, position="topleft", draw_options={"polygon":True,"polyline":False,"rectangle":False,"circle":False,"marker":False}).add_to(m)
 
+    # 起止点标记
     folium.Marker(A, icon=folium.Icon(color="red"), popup="起点A").add_to(m)
     folium.Marker(B, icon=folium.Icon(color="blue"), popup="终点B").add_to(m)
 
-    # 批量绘制障碍物
+    # 绘制所有障碍物
     fg = folium.FeatureGroup(name="Obstacles")
     for idx, obs in enumerate(st.session_state.obstacles):
         folium.Polygon(
-            locations=obs,
-            color="red", fill=True, fill_color="red", fill_opacity=0.4,
+            locations=obs, color="red", fill=True, fill_color="red", fill_opacity=0.4,
             popup=f"障碍物{idx+1} 高度：{st.session_state.obstacle_heights[idx]}m"
         ).add_to(fg)
     fg.add_to(m)
 
-    # 绘制航线
+    # 绘制航线（区分颜色）
     if st.session_state.route_choice == "直线飞行":
         line_color = "green"
     elif st.session_state.route_choice == "向左绕行":
@@ -242,12 +260,12 @@ with tab1:
         line_color = "blue"
     folium.PolyLine(route_points, color=line_color, weight=5, popup=st.session_state.route_choice).add_to(m)
 
-    # 渲染地图（动态key保证刷新）
+    # 渲染地图
     out = st_folium(m, key=st.session_state.map_key, width="100%", height=550, returned_objects=["all_drawings"])
 
-    # 处理新圈选的障碍物
+    # 处理新圈选障碍物
     if out and out.get("all_drawings"):
-        new_obs = False
+        new_obs_flag = False
         for d in out["all_drawings"]:
             if d["geometry"]["type"] == "Polygon":
                 coords = d["geometry"]["coordinates"][0]
@@ -255,31 +273,27 @@ with tab1:
                 if pts not in st.session_state.obstacles:
                     st.session_state.obstacles.append(pts)
                     st.session_state.obstacle_heights.append(10)
-                    new_obs = True
-        if new_obs:
+                    new_obs_flag = True
+        if new_obs_flag:
             st.session_state.map_key = f"map_{time.time()}"
             st.rerun()
 
-    # ---------------- 障碍物列表：设置高度 + 单独删除 ----------------
+    # 障碍物高度设置 + 单独删除
     if st.session_state.obstacles:
-        st.subheader("📏 障碍物列表（设置高度 / 单独删除）")
-        # 临时存储新高度
+        st.subheader("📏 障碍物列表（高度设置 / 单独删除）")
         temp_heights = []
-        # 遍历每一个障碍物，生成高度输入框 + 删除按钮
         for i in range(len(st.session_state.obstacles)):
             col_h, col_del = st.columns([4, 1])
             with col_h:
-                h = st.number_input(f"障碍物 {i+1} 高度(m)", 1, 200, st.session_state.obstacle_heights[i], key=f"h_{i}")
-                temp_heights.append(h)
+                h_val = st.number_input(f"障碍物 {i+1} 高度(m)", 1, 200, st.session_state.obstacle_heights[i], key=f"h_{i}")
+                temp_heights.append(h_val)
             with col_del:
-                # 单个删除按钮
                 if st.button(f"删除 {i+1}", key=f"del_{i}"):
-                    # 移除对应下标数据
                     del st.session_state.obstacles[i]
                     del st.session_state.obstacle_heights[i]
                     st.session_state.map_key = f"map_{time.time()}"
                     st.rerun()
-        # 更新高度并刷新
+        # 高度修改后刷新
         if temp_heights != st.session_state.obstacle_heights:
             st.session_state.obstacle_heights = temp_heights
             st.session_state.map_key = f"map_{time.time()}"
@@ -294,8 +308,8 @@ with tab2:
             st.session_state.running = True
     with c2:
         if st.button("⏹️ 停止心跳"):
-            st.session_state.running = False
             st.session_state.heart_data = []
+            st.session_state.running = False
 
     status = st.empty()
     chart = st.empty()
@@ -303,10 +317,10 @@ with tab2:
 
     if st.session_state.running:
         now = datetime.now().strftime("%H:%M:%S")
-        st.session_state.heart_data.append({"时间": now, "心跳": len(st.session_state.heart_data)+1})
-        status.success(f"✅ 心跳正常 | 最新序号：{len(st.session_state.heart_data)}")
+        st.session_state.heart_data.append({"时间": now, "心跳序号": len(st.session_state.heart_data)+1})
+        status.success(f"✅ 心跳正常 | 当前序号：{len(st.session_state.heart_data)}")
         df = pd.DataFrame(st.session_state.heart_data)
-        fig = px.line(df, x="时间", y="心跳", markers=True, title="心跳时序图")
+        fig = px.line(df, x="时间", y="心跳序号", markers=True, title="心跳时序图")
         chart.plotly_chart(fig, use_container_width=True)
         table.dataframe(df, use_container_width=True)
         time.sleep(1)
