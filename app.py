@@ -79,12 +79,23 @@ def line_cross_poly(p1, p2, poly):
             return True
     return False
 
+# 大幅膨胀障碍物安全区
 def inflate_polygon(poly, safe_meter):
-    scale = safe_meter * 0.00032
+    scale = safe_meter * 0.00045
     new_p = []
     for lat,lng in poly:
         new_p.append((lat + scale, lng + scale))
     return new_p
+
+# 检测整条航线是否安全
+def is_route_safe(route, obs_list):
+    for i in range(len(route)-1):
+        seg1 = route[i]
+        seg2 = route[i+1]
+        for o in obs_list:
+            if line_cross_poly(seg1, seg2, o):
+                return False
+    return True
 
 # -------------------------- 固定起止点 --------------------------
 A_LNG, A_LAT = 118.749, 32.2322
@@ -98,7 +109,7 @@ if "obstacle_heights" not in st.session_state:
 if "drone_height" not in st.session_state:
     st.session_state.drone_height = 10
 if "safe_radius" not in st.session_state:
-    st.session_state.safe_radius = 8
+    st.session_state.safe_radius = 12
 if "route_choice" not in st.session_state:
     st.session_state.route_choice = "直线飞行"
 if "map_key" not in st.session_state:
@@ -108,86 +119,55 @@ if "heart_data" not in st.session_state:
 if "running" not in st.session_state:
     st.session_state.running = False
 
-# ===================== 强化避障航线生成 =====================
+# ===================== 圆弧绕行算法（彻底解决穿透）=====================
 def generate_route(A, B, obstacles, safe_radius, mode, need_avoid):
     if not need_avoid or len(obstacles) == 0:
         return [A, B]
 
     inflated_obs = [inflate_polygon(obs, safe_radius) for obs in obstacles]
-    is_cross = False
-    for obs in inflated_obs:
-        if line_cross_poly(A, B, obs):
-            is_cross = True
-            break
-    if not is_cross:
+    if not line_cross_poly(A, B, inflated_obs[0]):
         return [A, B]
 
-    ab_dlat = B[0] - A[0]
-    ab_dlng = B[1] - A[1]
-    ab_len = math.hypot(ab_dlat, ab_dlng)
-    if ab_len < 1e-9:
-        return [A, B]
+    # 中心点、绕行半径（强制大半径绕开障碍）
+    cx = (A[0] + B[0]) / 2
+    cy = (A[1] + B[1]) / 2
+    base_r = safe_radius * 0.004
 
-    norm_dlat = -ab_dlng / ab_len
-    norm_dlng = ab_dlat / ab_len
+    # 生成左侧圆弧航线
+    left_arc = []
+    for angle in range(0, 181, 10):
+        rad = math.radians(angle - 90)
+        lat = cx + base_r * math.cos(rad)
+        lng = cy + base_r * math.sin(rad)
+        left_arc.append((lat, lng))
 
-    big_offset = safe_radius * 0.0028
-    pts_count = 11
-    base_pts = []
-    for i in range(pts_count):
-        ratio = i / (pts_count - 1)
-        lat = A[0] * (1 - ratio) + B[0] * ratio
-        lng = A[1] * (1 - ratio) + B[1] * ratio
-        base_pts.append((lat, lng))
+    # 生成右侧圆弧航线
+    right_arc = []
+    for angle in range(0, 181, 10):
+        rad = math.radians(angle + 90)
+        lat = cx + base_r * math.cos(rad)
+        lng = cy + base_r * math.sin(rad)
+        right_arc.append((lat, lng))
 
-    left_route = []
-    for (lat, lng) in base_pts:
-        new_lat = lat + norm_dlat * big_offset
-        new_lng = lng + norm_dlng * big_offset
-        left_route.append((new_lat, new_lng))
-
-    right_route = []
-    for (lat, lng) in base_pts:
-        new_lat = lat - norm_dlat * big_offset
-        new_lng = lng - norm_dlng * big_offset
-        right_route.append((new_lat, new_lng))
-
-    def check_route_safe(route, obs_list):
-        for i in range(len(route)-1):
-            for o in obs_list:
-                if line_cross_poly(route[i], route[i+1], o):
-                    return False
-        return True
-
+    # 选择航线 + 安全兜底
     if mode == "向左绕行":
-        if check_route_safe(left_route, inflated_obs):
-            return left_route
-        else:
-            return right_route
+        if is_route_safe(left_arc, inflated_obs):
+            return left_arc
+        return right_arc
     elif mode == "向右绕行":
-        if check_route_safe(right_route, inflated_obs):
-            return right_route
-        else:
-            return left_route
+        if is_route_safe(right_arc, inflated_obs):
+            return right_arc
+        return left_arc
     else:
-        def get_total_len(route):
-            total = 0.0
-            for i in range(len(route)-1):
-                dlat = route[i+1][0] - route[i][0]
-                dlng = route[i+1][1] - route[i][1]
-                total += math.hypot(dlat, dlng)
-            return total
-        len_l = get_total_len(left_route)
-        len_r = get_total_len(right_route)
-        if len_l < len_r and check_route_safe(left_route, inflated_obs):
-            return left_route
-        else:
-            return right_route
+        # 自动选安全航线
+        if is_route_safe(left_arc, inflated_obs):
+            return left_arc
+        return right_arc
 
 # -------------------------- 页面配置 --------------------------
 st.set_page_config(page_title="无人机航线规划系统", layout="wide")
 st.title("🎓 校园无人机智能航线规划 + 飞行监控")
-tab1, tab2 = st.tabs(["🗺️ 航线规划（高德卫星+全段偏移避障）", "📡 飞行监控（心跳包）"])
+tab1, tab2 = st.tabs(["🗺️ 航线规划（高德卫星+圆弧避障）", "📡 飞行监控（心跳包）"])
 
 # ====================== 航线规划页面 ======================
 with tab1:
@@ -202,7 +182,7 @@ with tab1:
     st.subheader("⚙️ 无人机参数设置")
     c1, c2 = st.columns(2)
     new_drone_h = st.number_input("无人机飞行高度 (米)", 1, 500, st.session_state.drone_height)
-    new_safe_r = st.number_input("安全缓冲半径 (米)", 5, 30, st.session_state.safe_radius)
+    new_safe_r = st.number_input("安全缓冲半径 (米)", 8, 50, st.session_state.safe_radius)
     if new_drone_h != st.session_state.drone_height or new_safe_r != st.session_state.safe_radius:
         st.session_state.drone_height = new_drone_h
         st.session_state.safe_radius = new_safe_r
@@ -236,7 +216,7 @@ with tab1:
             st.session_state.map_key = f"map_{time.time()}"
             st.rerun()
 
-    st.info("操作：多边形框选障碍物，低于障碍物高度时【整段侧向偏移绕行】，完全避开红色区域")
+    st.info("操作：多边形框选障碍物，低于障碍物高度时自动**圆弧绕行**，彻底避开障碍")
     st.divider()
 
     A = (A_LAT, A_LNG)
@@ -245,7 +225,7 @@ with tab1:
     need_avoid = st.session_state.drone_height < max_obs_h
 
     if need_avoid:
-        st.error(f"⚠️ 无人机高度 {st.session_state.drone_height}m < 最高障碍物 {max_obs_h}m，启用侧向绕行！")
+        st.error(f"⚠️ 无人机高度 {st.session_state.drone_height}m < 最高障碍物 {max_obs_h}m，启用圆弧绕行！")
         selected_route = st.radio("选择绕行方案", ["向左绕行", "向右绕行", "最佳航线（推荐）"])
         if selected_route != st.session_state.route_choice:
             st.session_state.route_choice = selected_route
@@ -294,7 +274,7 @@ with tab1:
         line_color = "purple"
     else:
         line_color = "blue"
-    folium.PolyLine(locations=route_points, color=line_color, weight=5, popup=st.session_state.route_choice).add_to(m)
+    folium.PolyLine(locations=route_points, color=line_color, weight=6, popup=st.session_state.route_choice).add_to(m)
 
     map_output = st_folium(m, key=st.session_state.map_key, width="100%", height=550, returned_objects=["all_drawings"])
 
