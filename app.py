@@ -643,7 +643,7 @@ def generate_adaptive_waypoints(start: List[float], end: List[float],
         
         for lat in waypoint_lats:
             # 基础经度
-    waypoint_lng = boundary_lng
+            waypoint_lng = boundary_lng
             
             # 根据纬度位置动态调整（靠近障碍物中心时稍微外扩）
             adjustment = 0
