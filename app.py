@@ -1,4 +1,4 @@
- import streamlit as st
+ import streamlit as s
 import folium
 from streamlit_folium import folium_static, st_folium
 from folium import plugins
